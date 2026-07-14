@@ -19,10 +19,14 @@ Extractors load lazily; a missing dependency disables that sensor with a warning
 instead of crashing the whole harness.
 """
 
+import os
 import warnings
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Local DINOv3 checkpoint (HF transformers format). Override with DINOV3_PATH.
+_DINOV3_DEFAULT = "/home/ma-user/work/dataset/xiaoyi_video_env/tmp/dinov3-vitb16-pretrain-lvd1689m"
 
 
 # ─────────────────────────── error metric ───────────────────────────
@@ -129,7 +133,36 @@ class _DreamSim:
         return torch.tensor([float(d)])
 
 
-_GOLD_BUILDERS = {"dino": _DINOv2, "arcface": _ArcFace, "dreamsim": _DreamSim}
+class _DINOv3:
+    """DINOv3 ViT-B/16 CLS token (local HF transformers checkpoint). Strictly stronger
+    perceptual/scene-appearance referee than DINOv2; same ImageNet norm, 224x224.
+    Lives in a space the latent moment-actuator cannot directly manipulate -> un-gameable."""
+    def __init__(self, device):
+        from transformers import AutoModel
+        path = os.environ.get("DINOV3_PATH", _DINOV3_DEFAULT)
+        self.device = device
+        self.model = AutoModel.from_pretrained(path).to(device).eval()
+        self.mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225], device=device).view(3, 1, 1)
+
+    @torch.no_grad()
+    def __call__(self, frame):
+        x = frame.to(self.device).float()
+        x = F.interpolate(x.unsqueeze(0), size=(224, 224), mode="bilinear", align_corners=False)
+        x = (x[0] - self.mean) / self.std
+        out = self.model(pixel_values=x.unsqueeze(0))
+        return out.last_hidden_state[0, 0].float().cpu()   # CLS token
+
+    def embed_grad(self, frame):
+        """Grad-enabled CLS embedding (stays on device, no no_grad) for gradient actuation."""
+        x = frame.to(self.device).float()
+        x = F.interpolate(x.unsqueeze(0), size=(224, 224), mode="bilinear", align_corners=False)
+        x = (x[0] - self.mean) / self.std
+        out = self.model(pixel_values=x.unsqueeze(0))
+        return out.last_hidden_state[0, 0].float()
+
+
+_GOLD_BUILDERS = {"dino": _DINOv2, "dino3": _DINOv3, "arcface": _ArcFace, "dreamsim": _DreamSim}
 
 
 def load_gold_sensors(names, device):

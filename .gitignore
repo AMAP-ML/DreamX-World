@@ -2,3 +2,9 @@ __pycache__
 outputs*
 .*
 CLAUDE.md
+demo_*/
+tune_ctx_*/
+sensor_validation_*/
+Wan2.2-TI2V-5B
+DreamX-World-5B
+*.log

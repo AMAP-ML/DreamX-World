@@ -1,0 +1,14 @@
+run                     N seed    hw |  d_drift0      t    win |   d_lag8   d_rot   d_mot
+demo_reroll_30s         3   42  A800 |   +0.0389  +1.14   6/16 |  +0.0010    -9.9   -0.45
+demo_reroll_s123_30s    3  123  H800 |   +0.0021  +0.09   7/16 |  +0.0020    -2.6   +0.44
+demo_reroll_n4_30s      5   42  H800 |   -0.0160  -0.75   8/16 |  +0.0021   +15.6   -0.37
+demo_reroll_n8_s42      8   42  H800 |   -0.0071  -0.24   8/16 |  -0.0024   -15.1   -0.26
+demo_reroll_n8_s123     8  123  H800 |   -0.0180  -0.58   8/16 |  -0.0019   -23.9   -0.08
+
+=== pooled by N (seeds combined; paired per-item deltas) ===
+ N items |  d_drift0      t    wins | d_drift0%   d_lag8 d_rot_deg
+ 3    32 |   +0.0205  +0.99  13/32  |     +4.2%  +0.0015      -6.2
+ 5    16 |   -0.0160  -0.75   8/16  |     -3.4%  +0.0021     +15.6
+ 8    32 |   -0.0125  -0.59  16/32  |     -2.6%  -0.0022     -19.5
+
+(negative d_drift0 = reroll reduces anchored drift; t < -2 ~ p<0.05 paired; d_rot >= 0 = motion safe)

@@ -1,0 +1,12 @@
+motion delta%: mean -1.5  std 20.9
+
+corr(drift_delta, motion_delta) = +0.291
+  (positive => reducing drift (dd<0) coincides with losing motion (mm<0) = COUPLING)
+
+WIN quadrant (drift<0 AND motion>=-3%): 40/208 = 19%
+drift-down-but-motion-lost:             59/208 = 28%
+drift-not-reduced (dd>=0):              109/208 = 52%
+
+Among items that reduced windowed drift (99): kept motion (>=-3%) in 40/99 = 40%
+
+wrote vibe_docs/coupling_frontier.png

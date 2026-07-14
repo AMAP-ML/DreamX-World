@@ -54,6 +54,8 @@ class CausalCameraInferencePipeline(torch.nn.Module):
         return_latents: bool = False,
         profile: bool = False,
         low_memory: bool = False,
+        chunk_callback=None,
+        chunk_scorer=None,
     ) -> torch.Tensor:
         batch_size, num_frames, num_channels, height, width = noise.shape
         if not self.independent_first_frame or (self.independent_first_frame and initial_latent is not None):
@@ -171,47 +173,74 @@ class CausalCameraInferencePipeline(torch.nn.Module):
 
             first_frame_mask_block = first_frame_mask[:, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
 
-            # Spatial denoising loop
-            for index, current_timestep in enumerate(self.denoising_step_list):
-                temp_ts = ((first_frame_mask_block[0, :, 0, ::2, ::2]) * current_timestep).flatten()
-                temp_ts = torch.cat([
-                    temp_ts,
-                    temp_ts.new_ones(self.frame_seq_length * current_num_frames - temp_ts.size(0)) * current_timestep
-                ])
-                timestep = temp_ts.unsqueeze(0).expand(batch_size, temp_ts.size(0))
+            # Spatial denoising loop (as a closure so best-of-N re-roll can re-run it with
+            # fresh noise; verbatim logic — byte-identical RNG path when chunk_scorer is None).
+            # KV note: candidate 0's first step appends+advances cache pointers; every later
+            # generator call at this position (more steps, more candidates, context rerun) is an
+            # in-place recompute, so re-rolls never corrupt the cache bookkeeping.
+            def _denoise_chunk(chunk_noise):
+                latents_c = chunk_noise
+                denoised_c, timestep_c = None, None
+                for index, current_timestep in enumerate(self.denoising_step_list):
+                    temp_ts = ((first_frame_mask_block[0, :, 0, ::2, ::2]) * current_timestep).flatten()
+                    temp_ts = torch.cat([
+                        temp_ts,
+                        temp_ts.new_ones(self.frame_seq_length * current_num_frames - temp_ts.size(0)) * current_timestep
+                    ])
+                    timestep_c = temp_ts.unsqueeze(0).expand(batch_size, temp_ts.size(0))
 
-                if index < len(self.denoising_step_list) - 1:
-                    _, denoised_pred = self.generator(
-                        noisy_image_or_video=latents,
-                        conditional_dict=conditional_dict,
-                        y=y_latents, y_camera=y_camera_latents,
-                        timestep=timestep,
-                        kv_cache=self.kv_cache1,
-                        crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length)
-                    next_timestep = self.denoising_step_list[index + 1]
-                    next_timestep = next_timestep * torch.ones(
-                        [batch_size, current_num_frames], device=noise.device, dtype=torch.long)
-                    if i == 0:
-                        next_timestep[:, 0] = 0
-                    latents = self.scheduler.add_noise(
-                        denoised_pred.flatten(0, 1),
-                        torch.randn_like(denoised_pred.flatten(0, 1)),
-                        next_timestep.flatten()
-                    ).unflatten(0, denoised_pred.shape[:2])
-                    latents = latents * first_frame_mask_block + noisy_input * (1 - first_frame_mask_block)
-                else:
-                    _, denoised_pred = self.generator(
-                        noisy_image_or_video=latents,
-                        conditional_dict=conditional_dict,
-                        y=y_latents, y_camera=y_camera_latents,
-                        timestep=timestep,
-                        kv_cache=self.kv_cache1,
-                        crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length)
-                    denoised_pred = denoised_pred * first_frame_mask_block + noisy_input * (1 - first_frame_mask_block)
+                    if index < len(self.denoising_step_list) - 1:
+                        _, denoised_c = self.generator(
+                            noisy_image_or_video=latents_c,
+                            conditional_dict=conditional_dict,
+                            y=y_latents, y_camera=y_camera_latents,
+                            timestep=timestep_c,
+                            kv_cache=self.kv_cache1,
+                            crossattn_cache=self.crossattn_cache,
+                            current_start=current_start_frame * self.frame_seq_length)
+                        next_timestep = self.denoising_step_list[index + 1]
+                        next_timestep = next_timestep * torch.ones(
+                            [batch_size, current_num_frames], device=noise.device, dtype=torch.long)
+                        if i == 0:
+                            next_timestep[:, 0] = 0
+                        latents_c = self.scheduler.add_noise(
+                            denoised_c.flatten(0, 1),
+                            torch.randn_like(denoised_c.flatten(0, 1)),
+                            next_timestep.flatten()
+                        ).unflatten(0, denoised_c.shape[:2])
+                        latents_c = latents_c * first_frame_mask_block + chunk_noise * (1 - first_frame_mask_block)
+                    else:
+                        _, denoised_c = self.generator(
+                            noisy_image_or_video=latents_c,
+                            conditional_dict=conditional_dict,
+                            y=y_latents, y_camera=y_camera_latents,
+                            timestep=timestep_c,
+                            kv_cache=self.kv_cache1,
+                            crossattn_cache=self.crossattn_cache,
+                            current_start=current_start_frame * self.frame_seq_length)
+                        denoised_c = denoised_c * first_frame_mask_block + chunk_noise * (1 - first_frame_mask_block)
+                return denoised_c, timestep_c
+
+            denoised_pred, timestep = _denoise_chunk(noisy_input)
+
+            # Best-of-N re-roll (on-manifold closed loop): the scorer may regenerate this chunk
+            # with fresh noise and return the best-scoring GENUINE model sample. Nothing
+            # externally modified is ever committed. Skipped for chunk 0 (contains frame 0).
+            if chunk_scorer is not None and i > 0:
+                denoised_pred = chunk_scorer(
+                    denoised_pred,
+                    lambda: _denoise_chunk(torch.randn_like(noisy_input))[0],
+                    chunk_index=i)
 
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
+
+            # Closed-loop hook: correct the chunk latent BEFORE it is committed to the
+            # KV cache, so the correction propagates to all future chunks. Byte-identical
+            # to the open-loop path when chunk_callback is None.
+            if chunk_callback is not None:
+                denoised_pred = chunk_callback(
+                    denoised_pred, chunk_index=i, current_start_frame=current_start_frame)
+                output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
             # Rerun with context noise to update KV cache
             context_timestep = torch.ones_like(timestep) * self.args.context_noise
