@@ -315,7 +315,7 @@ def get_camera_sequence(action_ids, action_speed_list, args):
 def process_inference_from_json(args, pipeline, device, vae, boundary):
     """Process inference for all images in input directory."""
 
-    with open(args.input_dir, 'r') as f:
+    with open(args.input_dir, 'r', encoding='utf-8') as f:
         items = json.load(f)
     
     
